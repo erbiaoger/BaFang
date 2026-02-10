@@ -24,3 +24,16 @@ python vehicle_signal/plot_synth_signals.py \
   --npz_path data/ddpm_test_samples_agc/synth_signals.npz \
   --num 8 \
   --out_path data/ddpm_test_samples_agc_plot/my_first8.png
+
+
+
+
+python cluster/cluster_vehicle_signals.py \
+  --pkl_dir data/peaks_agc/peaks_2025051900_00_veh.pkl \
+  --out_dir data/ddpm_test_samples_agc_cluster \
+  --length_mode crop \
+  --use_pca \
+  --algo hdbscan \
+  --min_cluster_size 30 \
+  --min_samples 10 \
+  --k_range 3,6

@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -16,8 +17,21 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     hdbscan = None
 
-from diffusion.diffusion_dataset import (
+
+def _add_repo_root_to_path() -> None:
+    here = Path(__file__).resolve()
+    for parent in [here.parent] + list(here.parents):
+        if (parent / "pyproject.toml").exists():
+            sys.path.insert(0, str(parent))
+            return
+
+
+_add_repo_root_to_path()
+
+from diffusion.diffusion_dataset import (  # noqa: E402
     build_signal_matrix,
+    flatten_grouped_records,
+    load_grouped_pkl,
     load_records_from_dir,
     normalize_signals,
 )
@@ -26,7 +40,7 @@ from vehicle_signal.features import extract_features, feature_names
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cluster vehicle signals into size classes")
-    parser.add_argument("--pkl_dir", required=True, help="Directory with grouped pkl files")
+    parser.add_argument("--pkl_dir", required=True, help="Directory with grouped pkl files OR a single .pkl file")
     parser.add_argument("--out_dir", required=True, help="Output directory")
     parser.add_argument("--length_mode", default="crop", choices=["crop", "pad"], help="Length handling mode")
     parser.add_argument("--target_len", type=int, default=None, help="Optional target length")
@@ -37,6 +51,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--k_range", default="3,6", help="KMeans range as 'min,max'")
     parser.add_argument("--sample_per_cluster", type=int, default=15, help="Samples per cluster for visualization")
     return parser.parse_args()
+
+
+def _load_records(path: Path) -> List[Dict]:
+    if path.is_dir():
+        return load_records_from_dir(str(path))
+    if path.is_file() and path.suffix.lower() == ".pkl":
+        grouped = load_grouped_pkl(path)
+        return flatten_grouped_records(grouped, path)
+    raise FileNotFoundError(f"pkl_dir not found or unsupported file: {path}")
 
 
 def _ensure_out_dir(out_dir: Path) -> None:
@@ -239,7 +262,7 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     _ensure_out_dir(out_dir)
 
-    records = load_records_from_dir(args.pkl_dir)
+    records = _load_records(Path(args.pkl_dir))
     signals, meta, info = build_signal_matrix(
         records,
         sample_length=args.target_len,
