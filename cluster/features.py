@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.signal import stft
+from scipy.signal import hilbert, find_peaks, stft
 from scipy.stats import kurtosis, skew
 import pycwt as wavelet
 
@@ -165,12 +165,126 @@ def _wavelet_energy_features(x: np.ndarray, eps: float = 1e-12) -> dict:
     }
 
 
+_ENVELOPE_KEYS = [
+    "envelope_width_50",
+    "envelope_width_25",
+    "envelope_area",
+    "rise_time",
+    "fall_time",
+    "rise_fall_asymmetry",
+    "num_envelope_peaks",
+    "peak_prominence_mean",
+    "peak_spacing_std",
+    "crest_factor",
+    "energy_gini",
+    "log_rms",
+]
+
+
+def _envelope_shape_features(x: np.ndarray, eps: float = 1e-12) -> dict:
+    n = x.size
+    zeros = {k: 0.0 for k in _ENVELOPE_KEYS}
+    if n < 64:
+        return zeros
+
+    envelope = np.abs(hilbert(x.astype(np.float64)))
+    peak_val = float(np.max(envelope))
+    if peak_val < eps:
+        return zeros
+
+    rms = float(np.sqrt(np.mean(np.square(x))))
+
+    envelope_width_50 = float(np.sum(envelope >= 0.5 * peak_val))
+    envelope_width_25 = float(np.sum(envelope >= 0.25 * peak_val))
+    envelope_area = float(np.sum(envelope) / (peak_val * n))
+
+    peak_idx = int(np.argmax(envelope))
+    thresh_10 = 0.1 * peak_val
+    thresh_90 = 0.9 * peak_val
+
+    rise_start = 0
+    rise_end = peak_idx
+    for i in range(peak_idx):
+        if envelope[i] >= thresh_10:
+            rise_start = i
+            break
+    for i in range(peak_idx):
+        if envelope[i] >= thresh_90:
+            rise_end = i
+            break
+    rise_time = float(max(0, rise_end - rise_start))
+
+    fall_start = peak_idx
+    fall_end = n - 1
+    for i in range(peak_idx, n):
+        if envelope[i] <= thresh_90:
+            fall_start = i
+            break
+    for i in range(n - 1, peak_idx - 1, -1):
+        if envelope[i] >= thresh_10:
+            fall_end = i
+            break
+    fall_time = float(max(0, fall_end - fall_start))
+
+    rise_fall_asymmetry = float((rise_time - fall_time) / (rise_time + fall_time + eps))
+
+    win = min(50, n // 4)
+    if win > 1:
+        kernel = np.ones(win) / win
+        smoothed = np.convolve(envelope, kernel, mode="same")
+    else:
+        smoothed = envelope
+    min_prominence = 0.3 * peak_val
+    peaks, properties = find_peaks(smoothed, prominence=min_prominence, distance=50)
+    num_peaks = float(len(peaks))
+    if len(peaks) > 0 and "prominences" in properties:
+        prominence_mean = float(np.mean(properties["prominences"]))
+    else:
+        prominence_mean = 0.0
+    if len(peaks) >= 2:
+        peak_spacing_std = float(np.std(np.diff(peaks)))
+    else:
+        peak_spacing_std = 0.0
+
+    crest_factor = float(peak_val / (rms + eps))
+
+    n_segments = 20
+    seg_len = max(1, n // n_segments)
+    seg_energies = np.array(
+        [float(np.sum(np.square(x[s * seg_len : min((s + 1) * seg_len, n)]))) for s in range(n_segments)]
+    )
+    seg_sorted = np.sort(seg_energies)
+    total_e = float(np.sum(seg_sorted) + eps)
+    cumulative_e = np.cumsum(seg_sorted)
+    energy_gini = float(1.0 - 2.0 * np.sum(cumulative_e) / (total_e * n_segments))
+
+    log_rms = float(np.log10(rms + eps))
+
+    return {
+        "envelope_width_50": envelope_width_50,
+        "envelope_width_25": envelope_width_25,
+        "envelope_area": envelope_area,
+        "rise_time": rise_time,
+        "fall_time": fall_time,
+        "rise_fall_asymmetry": rise_fall_asymmetry,
+        "num_envelope_peaks": num_peaks,
+        "peak_prominence_mean": prominence_mean,
+        "peak_spacing_std": peak_spacing_std,
+        "crest_factor": crest_factor,
+        "energy_gini": energy_gini,
+        "log_rms": log_rms,
+    }
+
+
+_N_FEATURES = 35
+
+
 def extract_features(signals: np.ndarray) -> np.ndarray:
     feats = []
     for x in signals:
         x = np.asarray(x, dtype=np.float32).reshape(-1)
         if x.size == 0:
-            feats.append([0.0] * 23)
+            feats.append([0.0] * _N_FEATURES)
             continue
         mean = float(np.mean(x))
         std = float(np.std(x))
@@ -184,6 +298,7 @@ def extract_features(signals: np.ndarray) -> np.ndarray:
         spec = _spectral_features(x)
         stft_feat = _stft_band_features(x)
         wav_feat = _wavelet_energy_features(x)
+        env = _envelope_shape_features(x)
 
         feat = [
             mean,
@@ -209,6 +324,18 @@ def extract_features(signals: np.ndarray) -> np.ndarray:
             wav_feat["wav_low_ratio"],
             wav_feat["wav_mid_ratio"],
             wav_feat["wav_high_ratio"],
+            env["envelope_width_50"],
+            env["envelope_width_25"],
+            env["envelope_area"],
+            env["rise_time"],
+            env["fall_time"],
+            env["rise_fall_asymmetry"],
+            env["num_envelope_peaks"],
+            env["peak_prominence_mean"],
+            env["peak_spacing_std"],
+            env["crest_factor"],
+            env["energy_gini"],
+            env["log_rms"],
         ]
         feats.append(feat)
     return np.asarray(feats, dtype=np.float32)
@@ -239,4 +366,16 @@ def feature_names() -> list[str]:
         "wav_low_ratio",
         "wav_mid_ratio",
         "wav_high_ratio",
+        "envelope_width_50",
+        "envelope_width_25",
+        "envelope_area",
+        "rise_time",
+        "fall_time",
+        "rise_fall_asymmetry",
+        "num_envelope_peaks",
+        "peak_prominence_mean",
+        "peak_spacing_std",
+        "crest_factor",
+        "energy_gini",
+        "log_rms",
     ]

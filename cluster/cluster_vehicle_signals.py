@@ -45,6 +45,21 @@ from diffusion.diffusion_dataset import (  # noqa: E402
 from features import extract_features, feature_names
 
 
+# ---------------------------------------------------------------------------
+# Shape feature weights: amplify shape features in clustering distance
+# ---------------------------------------------------------------------------
+SHAPE_FEATURE_WEIGHTS = {
+    "envelope_width_50": 2.0,
+    "envelope_width_25": 1.5,
+    "envelope_area": 1.5,
+    "num_envelope_peaks": 2.0,
+    "crest_factor": 1.5,
+    "energy_gini": 1.5,
+    "rise_time": 1.2,
+    "fall_time": 1.2,
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cluster vehicle signals into size classes")
     parser.add_argument("--pkl_dir", required=True, help="Directory with grouped pkl files OR a single .pkl file")
@@ -236,38 +251,83 @@ def _preassign_other(feats: np.ndarray, rms_floor: float, flatness_max: float, b
     return too_low | tonal
 
 
-def _map_to_three_classes(labels: np.ndarray, signals_for_size: np.ndarray) -> Tuple[np.ndarray, Dict]:
-    # Use top-2 largest clusters as big/small, all others + noise -> other (2).
+# ---------------------------------------------------------------------------
+# Feature weighting: boost shape features before clustering
+# ---------------------------------------------------------------------------
+def _weight_features(feats_scaled: np.ndarray, names: list[str]) -> np.ndarray:
+    weights = np.ones(len(names), dtype=np.float32)
+    for i, name in enumerate(names):
+        if name in SHAPE_FEATURE_WEIGHTS:
+            weights[i] = SHAPE_FEATURE_WEIGHTS[name]
+    return feats_scaled * weights[np.newaxis, :]
+
+
+# ---------------------------------------------------------------------------
+# Composite vehicle-size score (multi-feature, not just RMS)
+# ---------------------------------------------------------------------------
+_SIZE_POSITIVE_KEYS = [
+    "envelope_width_50",
+    "envelope_width_25",
+    "envelope_area",
+    "rise_time",
+    "fall_time",
+    "num_envelope_peaks",
+    "log_rms",
+]
+_SIZE_NEGATIVE_KEYS = ["crest_factor", "energy_gini"]
+
+
+def _compute_vehicle_size_score(feats: np.ndarray, feat_idx: Dict[str, int]) -> np.ndarray:
+    score = np.zeros(feats.shape[0], dtype=np.float64)
+    for key in _SIZE_POSITIVE_KEYS:
+        if key not in feat_idx:
+            continue
+        col = feats[:, feat_idx[key]].astype(np.float64)
+        mu, sigma = np.mean(col), float(np.std(col)) + 1e-12
+        score += (col - mu) / sigma
+    for key in _SIZE_NEGATIVE_KEYS:
+        if key not in feat_idx:
+            continue
+        col = feats[:, feat_idx[key]].astype(np.float64)
+        mu, sigma = np.mean(col), float(np.std(col)) + 1e-12
+        score -= (col - mu) / sigma
+    return score
+
+
+def _map_clusters_to_classes(
+    labels: np.ndarray,
+    feats: np.ndarray,
+    feat_idx: Dict[str, int],
+) -> Tuple[np.ndarray, Dict]:
     unique = [lab for lab in sorted(set(labels)) if lab != -1]
     if len(unique) < 2:
         mapped = np.full(labels.shape, 2, dtype=int)
         return mapped, {"strategy": "fallback_all_other"}
 
+    score = _compute_vehicle_size_score(feats, feat_idx)
+
     sizes = {lab: int(np.sum(labels == lab)) for lab in unique}
     top2 = sorted(unique, key=lambda l: sizes[l], reverse=True)[:2]
-    # Determine big/small by mean RMS on raw signals
-    def _mean_rms(lab: int) -> float:
-        idx = np.where(labels == lab)[0]
-        if idx.size == 0:
-            return 0.0
-        x = signals_for_size[idx]
-        rms = np.sqrt(np.mean(np.square(x), axis=1))
-        return float(np.mean(rms))
 
-    rms0 = _mean_rms(top2[0])
-    rms1 = _mean_rms(top2[1])
-    if rms0 >= rms1:
+    cluster_scores = {}
+    for lab in unique:
+        mask = labels == lab
+        cluster_scores[lab] = float(np.mean(score[mask]))
+
+    if cluster_scores[top2[0]] >= cluster_scores[top2[1]]:
         big_lab, small_lab = top2[0], top2[1]
     else:
         big_lab, small_lab = top2[1], top2[0]
 
-    mapped = np.full(labels.shape, 2, dtype=int)  # other
+    mapped = np.full(labels.shape, 2, dtype=int)
     mapped[labels == big_lab] = 0
     mapped[labels == small_lab] = 1
+
     return mapped, {
-        "strategy": "top2_by_size_then_rms",
+        "strategy": "top2_by_composite_score",
         "big_cluster": int(big_lab),
         "small_cluster": int(small_lab),
+        "cluster_scores": {str(k): round(v, 4) for k, v in cluster_scores.items()},
     }
 
 
@@ -292,19 +352,25 @@ def _run_mode(
     feats = extract_features(signals)
     feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
 
+    if signals_for_size is not signals:
+        feats_for_size = extract_features(signals_for_size)
+        feats_for_size = np.nan_to_num(feats_for_size, nan=0.0, posinf=0.0, neginf=0.0)
+    else:
+        feats_for_size = feats
+
+    feat_idx = _get_feat_idx()
+
     pre_mask = None
     if preassign_other:
-        pre_mask = _preassign_other(feats, rms_floor=rms_floor, flatness_max=flatness_max, bandwidth_max=bandwidth_max)
+        pre_mask = _preassign_other(feats_for_size, rms_floor=rms_floor, flatness_max=flatness_max, bandwidth_max=bandwidth_max)
     if pre_mask is not None and np.any(pre_mask):
         keep = ~pre_mask
         feats_use = feats[keep]
-        signals_use = signals[keep]
-        meta_use = [m for i, m in enumerate(meta) if keep[i]]
+        feats_for_size_use = feats_for_size[keep]
         keep_index = np.where(keep)[0]
     else:
         feats_use = feats
-        signals_use = signals
-        meta_use = meta
+        feats_for_size_use = feats_for_size
         keep_index = None
 
     if feats_use.shape[0] == 0:
@@ -351,7 +417,8 @@ def _run_mode(
 
     scaler = StandardScaler()
     feats_scaled = scaler.fit_transform(feats_use)
-    feats_pca, pca_info = _pca_reduce(feats_scaled, use_pca)
+    feats_weighted = _weight_features(feats_scaled, feature_names())
+    feats_pca, pca_info = _pca_reduce(feats_weighted, use_pca)
 
     n_samples = feats_pca.shape[0]
     if n_samples < 3:
@@ -384,7 +451,7 @@ def _run_mode(
 
     map_info = None
     if num_classes == 3:
-        labels, map_info = _map_to_three_classes(labels, signals_for_size[keep_index] if keep_index is not None else signals_for_size)
+        labels, map_info = _map_clusters_to_classes(labels, feats_for_size_use, feat_idx)
 
     if keep_index is not None:
         full_labels = np.full(signals.shape[0], 2, dtype=int)
