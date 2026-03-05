@@ -1,0 +1,10 @@
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-20/01/19030060_EHZ_1.00.sac	Actual and theoretical file size are inconsistent.
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-20/01/19130007_EHZ_1.00.sac	Actual and theoretical file size are inconsistent.
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-20/01/190300C8_EHZ_1.00.sac	inconsistent length: 3600001 (target 3600000)
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-20/01/19130018_EHZ_0.25.sac	inconsistent length: 14819016 (target 3600000)
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-20/03/19010055_EHZ_1.00.sac	Actual and theoretical file size are inconsistent.
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-20/04/19010055_EHZ_1.00.sac	inconsistent length: 3600001 (target 3600000)
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-19/04/19010055_EHZ_1.00.sac	Actual and theoretical file size are inconsistent.
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-19/02/19010055_EHZ_1.00.sac	inconsistent length: 3600001 (target 3600000)
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-19/01/19010055_EHZ_1.00.sac	Actual and theoretical file size are inconsistent.
+/Volumes/SanDisk2T4/BaFang/Track_data/origin/2025-05-19/00/19010055_EHZ_1.00.sac	inconsistent length: 3600001 (target 3600000)

@@ -1,5 +1,7 @@
 import numpy as np
+from scipy.signal import stft
 from scipy.stats import kurtosis, skew
+import pycwt as wavelet
 
 
 def _rms(x: np.ndarray) -> float:
@@ -59,12 +61,116 @@ def _spectral_features(x: np.ndarray, eps: float = 1e-12) -> dict:
     }
 
 
+def _stft_band_features(x: np.ndarray, eps: float = 1e-12) -> dict:
+    # STFT-based energy ratios and centroid dynamics
+    n = x.size
+    if n < 8:
+        return {
+            "stft_low_ratio": 0.0,
+            "stft_mid_ratio": 0.0,
+            "stft_high_ratio": 0.0,
+            "stft_bandwidth": 0.0,
+            "stft_centroid_mean": 0.0,
+            "stft_centroid_std": 0.0,
+        }
+
+    nperseg = min(256, n)
+    noverlap = min(nperseg // 2, nperseg - 1)
+    f, _, zxx = stft(x, nperseg=nperseg, noverlap=noverlap, boundary=None)
+    power = np.abs(zxx) ** 2
+    if power.size == 0 or f.size == 0:
+        return {
+            "stft_low_ratio": 0.0,
+            "stft_mid_ratio": 0.0,
+            "stft_high_ratio": 0.0,
+            "stft_bandwidth": 0.0,
+            "stft_centroid_mean": 0.0,
+            "stft_centroid_std": 0.0,
+        }
+
+    band1 = 0.1 * f.max()
+    band2 = 0.3 * f.max()
+    low_mask = f <= band1
+    mid_mask = (f > band1) & (f <= band2)
+    high_mask = f > band2
+
+    total = float(np.sum(power) + eps)
+    low = float(np.sum(power[low_mask, :]))
+    mid = float(np.sum(power[mid_mask, :]))
+    high = float(np.sum(power[high_mask, :]))
+
+    low_ratio = low / total
+    mid_ratio = mid / total
+    high_ratio = high / total
+
+    power_f = np.sum(power, axis=1)
+    total_f = float(np.sum(power_f) + eps)
+    centroid = float(np.sum(f * power_f) / total_f)
+    bandwidth = float(np.sqrt(np.sum(((f - centroid) ** 2) * power_f) / total_f))
+
+    # centroid over time
+    power_t = power + eps
+    denom_t = np.sum(power_t, axis=0)
+    centroid_t = np.sum(f[:, None] * power_t, axis=0) / denom_t
+    centroid_mean = float(np.mean(centroid_t))
+    centroid_std = float(np.std(centroid_t))
+
+    return {
+        "stft_low_ratio": low_ratio,
+        "stft_mid_ratio": mid_ratio,
+        "stft_high_ratio": high_ratio,
+        "stft_bandwidth": bandwidth,
+        "stft_centroid_mean": centroid_mean,
+        "stft_centroid_std": centroid_std,
+    }
+
+
+def _wavelet_energy_features(x: np.ndarray, eps: float = 1e-12) -> dict:
+    # Morlet wavelet energy ratios across scales (pycwt)
+    n = x.size
+    if n < 32:
+        return {
+            "wav_low_ratio": 0.0,
+            "wav_mid_ratio": 0.0,
+            "wav_high_ratio": 0.0,
+        }
+
+    dt = 1.0
+    dj = 1 / 12
+    s0 = 2 * dt
+    J = int(7 / dj)
+    wave = wavelet.Morlet(6)
+    coeffs, scales, _, _, _, _ = wavelet.cwt(x, dt, dj, s0, J, wave)
+    power = np.abs(coeffs) ** 2
+    if power.size == 0:
+        return {
+            "wav_low_ratio": 0.0,
+            "wav_mid_ratio": 0.0,
+            "wav_high_ratio": 0.0,
+        }
+
+    energy = np.sum(power, axis=1)
+    total = float(np.sum(energy) + eps)
+    # Split scales into low/mid/high by thirds
+    n_scales = energy.shape[0]
+    a = max(1, n_scales // 3)
+    low = float(np.sum(energy[:a]))
+    mid = float(np.sum(energy[a:2 * a]))
+    high = float(np.sum(energy[2 * a:]))
+
+    return {
+        "wav_low_ratio": low / total,
+        "wav_mid_ratio": mid / total,
+        "wav_high_ratio": high / total,
+    }
+
+
 def extract_features(signals: np.ndarray) -> np.ndarray:
     feats = []
     for x in signals:
         x = np.asarray(x, dtype=np.float32).reshape(-1)
         if x.size == 0:
-            feats.append([0.0] * 14)
+            feats.append([0.0] * 23)
             continue
         mean = float(np.mean(x))
         std = float(np.std(x))
@@ -76,6 +182,8 @@ def extract_features(signals: np.ndarray) -> np.ndarray:
         energy = float(np.sum(np.square(x)))
 
         spec = _spectral_features(x)
+        stft_feat = _stft_band_features(x)
+        wav_feat = _wavelet_energy_features(x)
 
         feat = [
             mean,
@@ -92,6 +200,15 @@ def extract_features(signals: np.ndarray) -> np.ndarray:
             spec["spectral_flatness"],
             spec["low_high_energy_ratio"],
             spec["dominant_freq"],
+            stft_feat["stft_low_ratio"],
+            stft_feat["stft_mid_ratio"],
+            stft_feat["stft_high_ratio"],
+            stft_feat["stft_bandwidth"],
+            stft_feat["stft_centroid_mean"],
+            stft_feat["stft_centroid_std"],
+            wav_feat["wav_low_ratio"],
+            wav_feat["wav_mid_ratio"],
+            wav_feat["wav_high_ratio"],
         ]
         feats.append(feat)
     return np.asarray(feats, dtype=np.float32)
@@ -113,4 +230,13 @@ def feature_names() -> list[str]:
         "spectral_flatness",
         "low_high_energy_ratio",
         "dominant_freq",
+        "stft_low_ratio",
+        "stft_mid_ratio",
+        "stft_high_ratio",
+        "stft_bandwidth",
+        "stft_centroid_mean",
+        "stft_centroid_std",
+        "wav_low_ratio",
+        "wav_mid_ratio",
+        "wav_high_ratio",
     ]

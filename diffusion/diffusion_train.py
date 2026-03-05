@@ -26,6 +26,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr_schedule", choices=["none", "cosine", "step", "exp"], default="cosine")
+    parser.add_argument("--min_lr", type=float, default=1e-6, help="Minimum LR for cosine schedule")
+    parser.add_argument("--step_size", type=int, default=20, help="Step size for StepLR")
+    parser.add_argument("--gamma", type=float, default=0.5, help="Gamma for StepLR/ExponentialLR")
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -37,6 +41,9 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(ema=True)
     parser.add_argument("--ema_decay", type=float, default=0.999)
     parser.add_argument("--base_channels", type=int, default=64)
+    parser.add_argument("--auto_resume", action="store_true", help="Auto-resume from ckpt_last.pt or ckpt_best.pt")
+    parser.add_argument("--resume_path", default=None, help="Explicit checkpoint path to resume from")
+    parser.add_argument("--resume_from", choices=["last", "best"], default="last", help="Auto-resume preference")
     return parser.parse_args()
 
 
@@ -58,6 +65,13 @@ class EMA:
         for name, p in model.named_parameters():
             if p.requires_grad:
                 p.data.copy_(self.shadow[name])
+
+    def state_dict(self):
+        return {"decay": self.decay, "shadow": self.shadow}
+
+    def load_state_dict(self, state):
+        self.decay = float(state.get("decay", self.decay))
+        self.shadow = state.get("shadow", self.shadow)
 
 
 def set_seed(seed: int):
@@ -129,16 +143,57 @@ def main() -> None:
     diffusion = GaussianDiffusion1D(timesteps=args.timesteps, beta_schedule=args.beta_schedule).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scheduler = None
+    if args.lr_schedule == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, args.epochs), eta_min=args.min_lr
+        )
+    elif args.lr_schedule == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+    elif args.lr_schedule == "exp":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.gamma)
     ema = EMA(model, decay=args.ema_decay) if args.ema else None
 
     best_val = float("inf")
+    start_epoch = 1
+
+    resume_ckpt = None
+    if args.resume_path:
+        resume_ckpt = Path(args.resume_path)
+    elif args.auto_resume:
+        last_path = out_dir / "ckpt_last.pt"
+        best_path = out_dir / "ckpt_best.pt"
+        if args.resume_from == "last" and last_path.exists():
+            resume_ckpt = last_path
+        elif args.resume_from == "best" and best_path.exists():
+            resume_ckpt = best_path
+        elif last_path.exists():
+            resume_ckpt = last_path
+        elif best_path.exists():
+            resume_ckpt = best_path
+
+    if resume_ckpt is not None and resume_ckpt.exists():
+        ckpt = torch.load(resume_ckpt, map_location=device)
+        if "model" in ckpt:
+            model.load_state_dict(ckpt["model"])
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        if scheduler is not None and "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
+        if ema is not None and "ema" in ckpt:
+            ema.load_state_dict(ckpt["ema"])
+        if "val_loss" in ckpt:
+            best_val = min(best_val, float(ckpt["val_loss"]))
+        if "epoch" in ckpt:
+            start_epoch = int(ckpt["epoch"]) + 1
+        print(f"Resumed from {resume_ckpt} at epoch {start_epoch}")
 
     save_stats_json(out_dir / "stats.json", stats)
     config = build_config(args, data_info, stats, total_samples=n)
     with open(out_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         train_losses = []
         for (xb,) in train_loader:
@@ -163,12 +218,14 @@ def main() -> None:
 
         train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
         val_loss = float(np.mean(val_losses)) if val_losses else float("nan")
-        print(f"Epoch {epoch:04d} | train_loss={train_loss:.6f} | val_loss={val_loss:.6f}")
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(f"Epoch {epoch:04d} | train_loss={train_loss:.6f} | val_loss={val_loss:.6f} | lr={current_lr:.6g}")
 
         ckpt = {
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "train_loss": train_loss,
             "val_loss": val_loss,
             "config": config,
@@ -180,14 +237,19 @@ def main() -> None:
             ema_model = UNet1D(in_channels=1, out_channels=1, base_channels=args.base_channels).to(device)
             ema.copy_to(ema_model)
             ckpt["ema_model"] = ema_model.state_dict()
+            ckpt["ema"] = ema.state_dict()
             del ema_model
 
         if epoch % args.save_every == 0:
             torch.save(ckpt, out_dir / f"ckpt_{epoch:04d}.pt")
+        torch.save(ckpt, out_dir / "ckpt_last.pt")
 
         if val_loss < best_val:
             best_val = val_loss
             torch.save(ckpt, out_dir / "ckpt_best.pt")
+
+        if scheduler is not None:
+            scheduler.step()
 
     print(f"Training done. Best val_loss={best_val:.6f}")
 
