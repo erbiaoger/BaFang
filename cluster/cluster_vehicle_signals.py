@@ -439,7 +439,9 @@ def _run_mode(
                 )
                 if labels is None:
                     raise RuntimeError("HDBSCAN failed to produce labels")
-                if best and (best.get("n_clusters", 0) < 2 or best.get("n_clusters", 0) > 6):
+                noise_ratio = float(np.mean(labels == -1))
+                n_clusters = best.get("n_clusters", 0) if best else 0
+                if n_clusters < 2 or n_clusters > 6 or noise_ratio > 0.3:
                     labels, best = _kmeans_best(feats_pca, k_range[0], k_range[1])
                     algo_used = "kmeans_fallback"
         else:
